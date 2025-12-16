@@ -1,87 +1,100 @@
 import json
 import gzip
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from langchain_groq import ChatGroq
-from os import getenv
 from dotenv import load_dotenv
+from os import getenv
+import time
 
-# ---------- EMBEDDING MODEL ----------
-model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+# ================= LOAD ENV =================
+load_dotenv()
 
-def generate_embedding(text):
-    return model.encode(text).tolist()
+# ================= EMBEDDINGS (DISABLED) =================
+# Originally used sentence-transformers + cosine similarity
+# Disabled due to free-tier memory limits on deployment
+#
+# from sentence_transformers import SentenceTransformer
+# from sklearn.metrics.pairwise import cosine_similarity
+#
+# _model = None
+# def generate_embedding(text: str):
+#     global _model
+#     if _model is None:
+#         _model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+#     return _model.encode(text).tolist()
 
-# ---------- LOAD DATA ONCE ----------
+# ================= LOAD DATA =================
 with gzip.open("movies.json.gz", "rt", encoding="utf-8") as f:
-    DATA = json.load(f)
+    data = json.load(f)
 
-ROWS = []
-EMBEDDINGS = []
+rows = []
+for d in data:
+    if d.get("title"):
+        rows.append(d)
 
-for doc in DATA:
-    if doc.get("embedding_hf") and doc.get("title"):
-        ROWS.append(doc)
-        EMBEDDINGS.append(doc["embedding_hf"])
+if not rows:
+    raise RuntimeError("No movie data found")
 
-if not EMBEDDINGS:
-    raise RuntimeError("No embeddings found")
+# ================= SEARCH (KEYWORD SCORING) =================
+# Lightweight search for production deployment
+# Avoids heavy ML models at runtime
 
-X = np.array(EMBEDDINGS)
+def search_movies(query):
+    q_words = query.lower().split()
+    scored = []
 
-# ---------- SEARCH ----------
-def main_code(query):
-    q = np.array(generate_embedding(query)).reshape(1, -1)
-    scores = cosine_similarity(q, X)[0]
+    for doc in rows:
+        text = (
+            (doc.get("title", "") + " " + doc.get("plot", ""))
+            .lower()
+        )
 
-    top_k = scores.argsort()[-10:][::-1]
+        score = sum(1 for w in q_words if w in text)
+
+        if score > 0:
+            scored.append((score, doc))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
 
     result = []
-    for i in top_k:
-        poster = ROWS[i].get("poster")
+    for _, d in scored[:10]:
+        poster = d.get("poster")
         if not poster or not str(poster).startswith("http"):
             poster = None
 
         result.append({
-            "title": ROWS[i]["title"],
+            "title": d["title"],
             "poster": poster
         })
 
     return result
 
-# ---------- LLM QUERY CLEANER ----------
-load_dotenv()
-GROQ_KEY = getenv("GROQ_API_KEY")
-
+# ================= LLM QUERY CLEANER =================
 llm = ChatGroq(
-    api_key=GROQ_KEY,
+    api_key=getenv("GROQ_API_KEY"),
     model="llama-3.1-8b-instant",
     temperature=0.2
 )
 
-def filter_query(user_query):
+def refine_query(q):
     prompt = f"""
-You are a query-refinement assistant.
+        Refine the query.
+        Do not add ideas.
+        Do not guess.
+        Output only refined text.
 
-Rules:
-- Do not add new concepts
-- Do not guess movie names
-- Do not hallucinate
-- Keep it short
-- Output only the refined query
+        Input:
+        "{q}"
 
-User input:
-"{user_query}"
+        Refined:
+        """
+    r = llm.invoke(prompt)
+    return r.content.strip().strip('"').strip("'")
 
-Refined query:
-"""
-    result = llm.invoke(prompt)
-    return result.content.strip().strip('"').strip("'")
-
-# ---------- FASTAPI ----------
+# ================= FASTAPI =================
 app = FastAPI()
 
 app.add_middleware(
@@ -91,7 +104,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/movie-result")
-def movie_result(movie_des: str):
-    refined = filter_query(movie_des)
-    return main_code(refined)
+# ================= FRONTEND =================
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def index():
+    return FileResponse("index.html")
+
+# ================= API =================
+
+@app.post("/movie-result")
+def movie_result(payload: dict):
+    movie_des = payload.get("movie_des")
+    if not movie_des:
+        raise HTTPException(status_code=400, detail="movie_des required")
+
+    refined = refine_query(movie_des)
+    time.sleep(4.5)
+    return search_movies(refined)

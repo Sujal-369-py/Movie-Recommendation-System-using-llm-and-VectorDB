@@ -33,12 +33,26 @@ async function getRecommendations() {
 
     showOverlay();
 
-    const url = `http://localhost:8000/movie-result?movie_des=${encodeURIComponent(query)}`;
+    const url = "/movie-result";
 
     try {
-        const res = await fetch(url);
+        const res = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                movie_des: query
+            })
+        });
+
+        if (!res.ok) throw new Error("Request failed");
+
         const data = await res.json();
         displayResults(data);
+    } catch (err) {
+        console.error(err);
+        alert("Something went wrong. Try again.");
     } finally {
         hideOverlay();
     }
@@ -52,19 +66,19 @@ function displayResults(movies) {
         const card = document.createElement("div");
         card.className = "movie-card";
 
-        const img = document.createElement("img");
-        img.src = movie.poster || "";
-        img.alt = movie.title;
-
-        img.onerror = () => {
-            img.remove();
-            const msg = document.createElement("div");
-            msg.className = "no-poster";
-            msg.innerText = "Sorry\nPoster not available";
-            card.prepend(msg);
-        };
-
         if (movie.poster) {
+            const img = document.createElement("img");
+            img.src = movie.poster;
+            img.alt = movie.title;
+
+            img.onerror = () => {
+                img.remove();
+                const msg = document.createElement("div");
+                msg.className = "no-poster";
+                msg.innerText = "Sorry\nPoster not available";
+                card.prepend(msg);
+            };
+
             card.appendChild(img);
         }
 
